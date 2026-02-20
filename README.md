@@ -78,6 +78,37 @@ choco install ffmpeg
 
 Record at least ~1–2 seconds; very short recordings are ignored. The result is always copied to the clipboard even if auto-paste fails.
 
+## Configuration
+
+Edit **`config.yml`** in the project folder (see the file for commented options). Restart the app after changes.
+
+| Section | Key | Example | Description |
+|--------|-----|---------|-------------|
+| `whisper` | `model` | `"base"`, `"small"`, `"medium"`, `"large-v3"` | Bigger = more accurate, more RAM and CPU. See [Model size and hardware](#model-size-and-hardware) below. |
+| `whisper` | `language` | `null`, `"es"`, `"en"` | `null` = auto-detect. Set to your language (e.g. `"es"`) for better accuracy. |
+| `whisper` | `vad_filter` | `true`, `false` | Voice activity detection; can trim silence. Turn off if it cuts words. |
+| `whisper` | `compute_type` | `"int8"` | Keep `int8` for CPU. |
+| `recording` | `sample_rate` | `16000`, `48000` | Recording sample rate. If your mic sounds worse than in Windows Voice Recorder, try `48000` (then resampled to 16k for Whisper). |
+| `recording` | `input_device` | `null`, `0`, `1`, … | `null` = default mic. Use a device index from `sounddevice.query_devices()` if you have multiple. |
+| `recording` | `min_duration_sec` | `1.2` | Ignore stop if recording shorter than this (avoids accidental double-press). |
+| `ui` | `hotkey_debounce_sec` | `0.6` | Ignore repeated shortcut within this many seconds. |
+| `ui` | `overlay_offset_from_bottom_px` | `72` | Pixels above the taskbar for the status overlay. |
+
+## Model size and hardware
+
+Rough guide for **CPU-only** (no GPU). Bigger models are more accurate but use more RAM and time.
+
+| Model | Approx. size | RAM (peak) | Typical PC | Notes |
+|-------|----------------|------------|------------|--------|
+| `base` | ~150 MB | ~1–2 GB | Any 8 GB+ PC | Fast, good for short phrases. |
+| `small` | ~500 MB | ~2–3 GB | 8 GB+ RAM, any modern CPU | Best balance for most users. |
+| `medium` | ~1.5 GB | ~5–6 GB | 16 GB RAM, decent CPU | Slower, fewer errors. |
+| `large-v3` | ~3 GB | ~10 GB | 32 GB RAM, strong CPU | Most accurate, can be slow on CPU. |
+
+- **If you’re not sure:** start with `base`; if you need better accuracy, switch to `small` in `config.yml` (first run will download the model).
+- **Check your RAM:** Task Manager → Performance → Memory. Leave headroom for the rest of the system.
+- **Speed:** On a typical laptop, `base` is almost instant; `small` a few seconds; `medium`/`large` can take 10–30+ seconds for a long clip.
+
 ## Troubleshooting
 
 | Issue | What to do |

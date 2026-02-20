@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import yaml
 import sys
 import threading
 import time
@@ -13,9 +14,38 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-# Logging: file + console. Recordings saved under logs/recordings/
-LOG_DIR = Path(__file__).resolve().parent / "logs"
+SCRIPT_DIR = Path(__file__).resolve().parent
+LOG_DIR = SCRIPT_DIR / "logs"
 RECORDINGS_DIR = LOG_DIR / "recordings"
+
+# Load config (defaults if missing or invalid)
+def _load_config() -> dict:
+    default = {
+        "whisper": {"model": "base", "language": None, "vad_filter": True, "compute_type": "int8"},
+        "recording": {"sample_rate": 16000, "input_device": None, "min_duration_sec": 1.2},
+        "ui": {"hotkey_debounce_sec": 0.6, "overlay_offset_from_bottom_px": 72},
+    }
+    config_path = SCRIPT_DIR / "config.yml"
+    if not config_path.exists():
+        return default
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not data:
+            return default
+        out = {}
+        for section, opts in default.items():
+            out[section] = dict(opts)
+            if section in data and isinstance(data[section], dict):
+                for k in opts:
+                    if k in data[section]:
+                        out[section][k] = data[section][k]
+        return out
+    except Exception:
+        return default
+
+CONFIG = _load_config()
+WHISPER_TARGET_RATE = 16000
 
 def _setup_logging() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,8 +73,9 @@ except ImportError:
 try:
     import sounddevice as sd
     import numpy as np
+    from scipy import signal as scipy_signal
 except ImportError:
-    print("Missing: pip install sounddevice scipy")
+    print("Missing: pip install sounddevice scipy numpy")
     sys.exit(1)
 try:
     from faster_whisper import WhisperModel
@@ -101,7 +132,8 @@ def _overlay_thread(state_queue: Queue) -> None:
     # Bottom-right, just above taskbar
     root.update_idletasks()
     w, h = root.winfo_reqwidth(), root.winfo_reqheight()
-    y_bottom = root.winfo_screenheight() - h - 72
+    offset = int(CONFIG["ui"].get("overlay_offset_from_bottom_px", 72))
+    y_bottom = root.winfo_screenheight() - h - offset
     root.geometry(f"+{root.winfo_screenwidth() - w - 16}+{y_bottom}")
     label = tk.Label(
         root,
@@ -151,21 +183,27 @@ def _overlay_poll(root: tk.Tk, label: tk.Label, state_queue: Queue) -> None:
 
 
 # --- Recording ---
-SAMPLE_RATE = 16000
 CHANNELS = 1
 DTYPE = np.int16
-MIN_RECORDING_DURATION = 1.2  # seconds; ignore stop if shorter (avoids accidental double-press)
 
 
-def record_audio_until_stop(stop_event: threading.Event) -> tuple[np.ndarray | None, float]:
-    """Record from default input until stop_event is set. Returns (samples, duration_sec) or (None, 0) on error."""
-    try:
-        device = sd.default.device
-        if device[0] is None:
-            sd.default.device = None  # use system default
-    except Exception as e:
-        log.error("Audio device error: %s", e)
-        return None, 0.0
+def record_audio_until_stop(stop_event: threading.Event) -> tuple[np.ndarray | None, float, int]:
+    """Record from input until stop_event. Returns (samples_16k, duration_sec, record_sample_rate)."""
+    rec_cfg = CONFIG["recording"]
+    sample_rate = int(rec_cfg["sample_rate"])
+    device = rec_cfg.get("input_device")
+    if device is not None:
+        try:
+            sd.default.device = (int(device), sd.default.device[1] if isinstance(sd.default.device, tuple) else None)
+        except Exception as e:
+            log.warning("Invalid input_device in config: %s; using default", e)
+            sd.default.device = None
+    else:
+        try:
+            if sd.default.device[0] is None:
+                sd.default.device = None
+        except Exception:
+            sd.default.device = None
 
     chunks: list[np.ndarray] = []
     start_time = time.perf_counter()
@@ -177,52 +215,73 @@ def record_audio_until_stop(stop_event: threading.Event) -> tuple[np.ndarray | N
 
     try:
         stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
+            samplerate=sample_rate,
             channels=CHANNELS,
             dtype=DTYPE,
             blocksize=1024,
             callback=callback,
         )
         stream.start()
-        log.info("Recording started — speak now (Ctrl+Shift+M to stop)")
+        log.info("Recording started (rate=%d) — speak now (Ctrl+Shift+M to stop)", sample_rate)
         while not stop_event.is_set():
             stop_event.wait(0.1)
         stream.stop()
         stream.close()
     except sd.PortAudioError as e:
         log.error("Microphone error: %s", e)
-        return None, 0.0
+        return None, 0.0, sample_rate
     except Exception as e:
         log.exception("Recording error")
-        return None, 0.0
+        return None, 0.0, sample_rate
 
     duration = time.perf_counter() - start_time
     if not chunks:
         log.warning("Recording stopped — no audio captured")
-        return None, duration
+        return None, duration, sample_rate
     samples = np.concatenate(chunks, axis=0)
-    log.info("Recording stopped — duration %.1f s, %d samples", duration, len(samples))
-    return samples, duration
+    log.info("Recording stopped — duration %.1f s, %d samples @ %d Hz", duration, len(samples), sample_rate)
+
+    if sample_rate != WHISPER_TARGET_RATE:
+        num_out = int(round(len(samples) * WHISPER_TARGET_RATE / sample_rate))
+        samples = scipy_signal.resample(samples.astype(np.float64) / 32768.0, num_out)
+        samples = (samples * 32768.0).clip(-32768, 32767).astype(np.int16)
+        log.info("Resampled %d -> %d Hz for Whisper", sample_rate, WHISPER_TARGET_RATE)
+    return samples, duration, sample_rate
 
 
-def save_wav(samples: np.ndarray, path: str | Path) -> None:
+def save_wav(samples: np.ndarray, path: str | Path, sample_rate: int = WHISPER_TARGET_RATE) -> None:
     path = Path(path)
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(CHANNELS)
-        wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(SAMPLE_RATE)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
         wf.writeframes(samples.tobytes())
 
 
 # --- Transcription ---
+_whisper_model_cache = None
+
 def load_whisper_model():
-    # CPU, base model, no download if already cached
-    return WhisperModel("base", device="cpu", compute_type="int8")
+    global _whisper_model_cache
+    if _whisper_model_cache is not None:
+        return _whisper_model_cache
+    w = CONFIG["whisper"]
+    _whisper_model_cache = WhisperModel(
+        w["model"],
+        device="cpu",
+        compute_type=w.get("compute_type") or "int8",
+    )
+    return _whisper_model_cache
 
 
 def transcribe_audio(wav_path: str | Path) -> str:
     model = load_whisper_model()
-    segments, info = model.transcribe(str(wav_path), language=None, vad_filter=True)
+    w = CONFIG["whisper"]
+    segments, info = model.transcribe(
+        str(wav_path),
+        language=w.get("language"),
+        vad_filter=w.get("vad_filter", True),
+    )
     text = " ".join(s.text.strip() for s in segments if s.text and s.text.strip()).strip()
     return text or ""
 
@@ -255,7 +314,7 @@ class DictationApp:
         self._recording_thread: threading.Thread | None = None
         self._icon: pystray.Icon | None = None
         self._last_hotkey_time = 0.0
-        self._hotkey_debounce_sec = 0.6
+        self._hotkey_debounce_sec = float(CONFIG["ui"].get("hotkey_debounce_sec", 0.6))
 
     def set_state(self, new: State) -> None:
         with self._lock:
@@ -298,11 +357,12 @@ class DictationApp:
         self._stop_recording.set()
 
     def _record_then_transcribe(self) -> None:
-        samples, duration = record_audio_until_stop(self._stop_recording)
+        samples, duration, _ = record_audio_until_stop(self._stop_recording)
         if samples is None or len(samples) == 0:
             self.set_state(State.IDLE)
             return
-        if duration < MIN_RECORDING_DURATION:
+        min_dur = float(CONFIG["recording"].get("min_duration_sec", 1.2))
+        if duration < min_dur:
             log.warning("Recording too short (%.1fs) — speak while red, then press to stop", duration)
             self.set_state(State.IDLE)
             return
@@ -310,7 +370,7 @@ class DictationApp:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         saved_wav = RECORDINGS_DIR / f"recording_{timestamp}.wav"
         try:
-            save_wav(samples, saved_wav)
+            save_wav(samples, saved_wav, WHISPER_TARGET_RATE)
             log.info("Saved recording to %s", saved_wav)
             log.info("Transcribing...")
             text = transcribe_audio(saved_wav)

@@ -1,0 +1,26 @@
+# Voice Dictation config. Restart the app after changes.
+# See README for model size and hardware guidance.
+
+whisper:
+  # Model: base | small | medium | large-v3 (bigger = more accurate, more RAM/CPU)
+  model: base
+  # Language: null (auto-detect) | "es" | "en" | "fr" | etc. Set for better accuracy.
+  language: es
+  # Voice activity detection; can trim silence. Set false if it cuts words.
+  vad_filter: true
+  # For CPU keep int8.
+  compute_type: int8
+
+recording:
+  # Sample rate: 16000 | 48000. Try 48000 if mic sounds worse than Windows recorder.
+  sample_rate: 16000
+  # Input device: null (default mic) | 0 | 1 | ... (index from sounddevice.query_devices())
+  input_device: null
+  # Min recording seconds; shorter recordings are ignored (avoids double-press).
+  min_duration_sec: 1.2
+
+ui:
+  # Ignore repeated shortcut within this many seconds.
+  hotkey_debounce_sec: 0.6
+  # Pixels above taskbar for the status overlay.
+  overlay_offset_from_bottom_px: 72
