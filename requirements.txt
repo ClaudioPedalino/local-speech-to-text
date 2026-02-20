@@ -1,0 +1,12 @@
+# Voice Dictation - offline, system tray, Ctrl+Shift+M
+# Python 3.10+ recommended. FFmpeg must be installed separately (see INSTRUCCIONES.md).
+
+keyboard>=0.13.5
+sounddevice>=0.4.6
+scipy>=1.11.0
+numpy>=1.24.0,<2.0
+faster-whisper>=1.0.0
+pyperclip>=1.8.2
+pyautogui>=0.9.54
+pystray>=0.19.5
+Pillow>=10.0.0
